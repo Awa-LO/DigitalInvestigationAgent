@@ -19,6 +19,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -53,7 +55,8 @@ data class PermissionInfo(
     val name: String,
     val description: String,
     val icon: ImageVector,
-    val isGranted: Boolean = false
+    val isGranted: Boolean = false,
+    val canProceedWithoutIt: Boolean = true // Permet de continuer sans cette permission
 )
 
 class MainActivity : ComponentActivity() {
@@ -104,12 +107,11 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(this, "Permission de gestion des fichiers accordée", Toast.LENGTH_SHORT).show()
                 permissionCallback?.invoke(true)
             } else {
-                Toast.makeText(this, "Permission de gestion des fichiers refusée", Toast.LENGTH_SHORT).show()
-                permissionCallback?.invoke(false)
+                Toast.makeText(this, "Permission de gestion des fichiers refusée - Collecte continuera avec accès limité", Toast.LENGTH_LONG).show()
+                permissionCallback?.invoke(true) // Continuer même sans cette permission
             }
         } else {
-            // Fallback pour les versions antérieures
-            permissionCallback?.invoke(false)
+            permissionCallback?.invoke(true)
         }
     }
 
@@ -177,7 +179,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(updateReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(updateReceiver, filter,RECEIVER_EXPORTED)
+            registerReceiver(updateReceiver, filter ,RECEIVER_EXPORTED)
         }
 
         setContent {
@@ -210,6 +212,9 @@ class MainActivity : ComponentActivity() {
         var savePath by remember { mutableStateOf<String?>(null) }
         var showPermissionsDialog by remember { mutableStateOf(false) }
 
+        // État de défilement pour la colonne principale
+        val scrollState = rememberScrollState()
+
         // Mettre à jour le callback
         LaunchedEffect(Unit) {
             updateCallback = { status, result, path ->
@@ -227,6 +232,7 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(scrollState) // Ajout de la barre de défilement
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -272,15 +278,8 @@ class MainActivity : ComponentActivity() {
             ActionButtons(
                 isCollecting = isCollecting,
                 onStartCollection = {
-                    if (checkAllPermissions()) {
-                        startCollection()
-                        isCollecting = true
-                        currentStatus = "Démarrage de la collecte..."
-                        collectionResult = CollectionResult() // Reset compteurs
-                        savePath = null
-                    } else {
-                        showPermissionsDialog = true
-                    }
+                    // TOUJOURS demander les permissions avant de démarrer
+                    showPermissionsDialog = true
                 },
                 onStopCollection = {
                     stopCollection()
@@ -303,11 +302,40 @@ class MainActivity : ComponentActivity() {
                     onRequestPermissions = {
                         showPermissionsDialog = false
                         requestAllPermissions { granted ->
-                            if (granted) {
-                                Toast.makeText(this@MainActivity, "Toutes les permissions accordées", Toast.LENGTH_SHORT).show()
+                            // Démarrer la collecte même si toutes les permissions ne sont pas accordées
+                            val grantedPermissions = getGrantedPermissions()
+                            if (grantedPermissions.isNotEmpty()) {
+                                startCollection()
+                                isCollecting = true
+                                currentStatus = "Démarrage de la collecte avec ${grantedPermissions.size} permissions accordées..."
+                                collectionResult = CollectionResult()
+                                savePath = null
+                                Toast.makeText(this@MainActivity,
+                                    "Collecte démarrée avec ${grantedPermissions.size}/${getRequiredPermissions().size} permissions",
+                                    Toast.LENGTH_LONG).show()
                             } else {
-                                Toast.makeText(this@MainActivity, "Certaines permissions sont manquantes", Toast.LENGTH_LONG).show()
+                                Toast.makeText(this@MainActivity,
+                                    "Aucune permission accordée. Impossible de démarrer la collecte.",
+                                    Toast.LENGTH_LONG).show()
                             }
+                        }
+                    },
+                    onStartWithCurrentPermissions = {
+                        showPermissionsDialog = false
+                        val grantedPermissions = getGrantedPermissions()
+                        if (grantedPermissions.isNotEmpty()) {
+                            startCollection()
+                            isCollecting = true
+                            currentStatus = "Démarrage de la collecte avec ${grantedPermissions.size} permissions accordées..."
+                            collectionResult = CollectionResult()
+                            savePath = null
+                            Toast.makeText(this@MainActivity,
+                                "Collecte démarrée avec ${grantedPermissions.size}/${getRequiredPermissions().size} permissions",
+                                Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this@MainActivity,
+                                "Aucune permission accordée. Impossible de démarrer la collecte.",
+                                Toast.LENGTH_LONG).show()
                         }
                     }
                 )
@@ -528,25 +556,58 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun PermissionsDialog(
         onDismiss: () -> Unit,
-        onRequestPermissions: () -> Unit
+        onRequestPermissions: () -> Unit,
+        onStartWithCurrentPermissions: () -> Unit
     ) {
         val permissions = getPermissionsList()
+        val grantedCount = permissions.count { it.isGranted }
 
         AlertDialog(
             onDismissRequest = onDismiss,
             title = {
-                Text("Permissions requises")
+                Text("Permissions pour la collecte")
             },
             text = {
-                LazyColumn {
-                    items(permissions) { permission ->
-                        PermissionItem(permission)
+                Column {
+                    Text(
+                        text = "Permissions accordées: $grantedCount/${permissions.size}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "La collecte peut démarrer avec les permissions actuelles. Seules les données autorisées seront collectées.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    LazyColumn(
+                        modifier = Modifier.height(300.dp)
+                    ) {
+                        items(permissions) { permission ->
+                            PermissionItem(permission)
+                        }
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = onRequestPermissions) {
-                    Text("Accorder les permissions")
+                Column {
+                    Button(
+                        onClick = onRequestPermissions,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Demander toutes les permissions")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onStartWithCurrentPermissions,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = grantedCount > 0
+                    ) {
+                        Text("Démarrer avec permissions actuelles ($grantedCount)")
+                    }
                 }
             },
             dismissButton = {
@@ -579,7 +640,7 @@ class MainActivity : ComponentActivity() {
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = permission.description,
+                    text = permission.description + if (permission.canProceedWithoutIt) " (Optionnel)" else " (Requis)",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -611,7 +672,8 @@ class MainActivity : ComponentActivity() {
                     name = name,
                     description = description,
                     icon = icon,
-                    isGranted = checkPermission(permission)
+                    isGranted = checkPermission(permission),
+                    canProceedWithoutIt = true // Toutes les permissions sont optionnelles
                 )
             )
         }
@@ -623,35 +685,30 @@ class MainActivity : ComponentActivity() {
         return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun checkAllPermissions(): Boolean {
-        return getRequiredPermissions().all { checkPermission(it) }
+    private fun getGrantedPermissions(): List<String> {
+        return getRequiredPermissions().filter { checkPermission(it) }
     }
 
     private fun requestAllPermissions(callback: (Boolean) -> Unit) {
         permissionCallback = callback
 
-        val permissionsToRequest = getRequiredPermissions().filter { !checkPermission(it) }
-
-        if (permissionsToRequest.isEmpty()) {
-            callback(true)
-            return
-        }
+        // TOUJOURS demander toutes les permissions, même celles déjà accordées
+        val allPermissions = getRequiredPermissions()
 
         // Demander les permissions spéciales pour Android 11+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-            permissionsToRequest.contains(Manifest.permission.READ_EXTERNAL_STORAGE)) {
+            allPermissions.contains(Manifest.permission.READ_EXTERNAL_STORAGE)) {
 
-            if (!Environment.isExternalStorageManager()) {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                manageStoragePermissionLauncher.launch(intent)
-                return
+            // Toujours demander, même si déjà accordée
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:$packageName")
             }
+            manageStoragePermissionLauncher.launch(intent)
+            return
         }
 
-        // Demander les permissions normales
-        ActivityCompat.requestPermissions(this, permissionsToRequest.toTypedArray(), permissionRequestCode)
+        // Demander TOUTES les permissions normales (pas seulement celles manquantes)
+        ActivityCompat.requestPermissions(this, allPermissions, permissionRequestCode)
     }
 
     override fun onRequestPermissionsResult(
@@ -662,8 +719,14 @@ class MainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == permissionRequestCode) {
-            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            permissionCallback?.invoke(allGranted)
+            // Ne pas exiger que toutes soient accordées
+            val grantedCount = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
+
+            Toast.makeText(this,
+                "Permissions accordées: $grantedCount/${permissions.size}",
+                Toast.LENGTH_LONG).show()
+
+            permissionCallback?.invoke(grantedCount > 0)
         }
     }
 

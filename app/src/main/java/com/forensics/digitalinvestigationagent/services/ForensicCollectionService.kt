@@ -139,25 +139,40 @@ class ForensicCollectionService : Service() {
                 updateNotification("Collecte en cours...")
                 sendBroadcast("Démarrage de la collecte de données")
 
-                // Collecte des données en parallèle
-                val jobs = listOf(
-                    async { collectSMS() },
-                    async { collectCallLogs() },
-                    async { collectContacts() },
-                    async { collectImages() },
-                    async { collectVideos() },
-                    async { collectAudio() }
-                )
+                // Collecte des données en parallèle seulement pour les permissions accordées
+                val jobs = mutableListOf<Deferred<Unit>>()
+
+                // Vérifier chaque permission et collecter seulement si accordée
+                if (hasPermission(android.Manifest.permission.READ_SMS)) {
+                    jobs.add(async { collectSMS() })
+                }
+
+                if (hasPermission(android.Manifest.permission.READ_CALL_LOG)) {
+                    jobs.add(async { collectCallLogs() })
+                }
+
+                if (hasPermission(android.Manifest.permission.READ_CONTACTS)) {
+                    jobs.add(async { collectContacts() })
+                }
+
+                if (hasMediaPermission()) {
+                    jobs.add(async { collectImages() })
+                    jobs.add(async { collectVideos() })
+                    jobs.add(async { collectAudio() })
+                }
 
                 // Attendre la fin de toutes les collectes
-                jobs.awaitAll()
+                if (jobs.isNotEmpty()) {
+                    jobs.awaitAll()
+                }
 
                 if (!shouldStop) {
                     // Sauvegarder toutes les données
                     saveAllData()
 
-                    sendBroadcastComplete("Collecte terminée avec succès", sessionFolder?.absolutePath)
-                    updateNotification("Collecte terminée - ${getTotalCount()} éléments collectés")
+                    val totalCollected = getTotalCount()
+                    sendBroadcastComplete("Collecte terminée avec succès - $totalCollected éléments", sessionFolder?.absolutePath)
+                    updateNotification("Collecte terminée - $totalCollected éléments collectés")
                 } else {
                     sendBroadcastStopped("Collecte arrêtée par l'utilisateur", sessionFolder?.absolutePath)
                     updateNotification("Collecte arrêtée")
@@ -180,7 +195,11 @@ class ForensicCollectionService : Service() {
         // Sauvegarder les données partielles
         if (getTotalCount() > 0) {
             serviceScope.launch {
-                saveAllData()
+                try {
+                    saveAllData()
+                } catch (e: Exception) {
+                    Log.e("ForensicService", "Erreur sauvegarde partielle: ${e.message}")
+                }
             }
         }
 
@@ -221,8 +240,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectSMS() {
-        if (!hasPermission(android.Manifest.permission.READ_SMS)) return
-
         try {
             val cursor = contentResolver.query(
                 Telephony.Sms.CONTENT_URI,
@@ -262,8 +279,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectCallLogs() {
-        if (!hasPermission(android.Manifest.permission.READ_CALL_LOG)) return
-
         try {
             val cursor = contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
@@ -302,8 +317,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectContacts() {
-        if (!hasPermission(android.Manifest.permission.READ_CONTACTS)) return
-
         try {
             val cursor = contentResolver.query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
@@ -337,8 +350,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectImages() {
-        if (!hasMediaPermission()) return
-
         try {
             val cursor = contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -381,8 +392,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectVideos() {
-        if (!hasMediaPermission()) return
-
         try {
             val cursor = contentResolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
@@ -427,8 +436,6 @@ class ForensicCollectionService : Service() {
     }
 
     private suspend fun collectAudio() {
-        if (!hasMediaPermission()) return
-
         try {
             val cursor = contentResolver.query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
@@ -538,6 +545,13 @@ class ForensicCollectionService : Service() {
             put("images_count", imagesCount)
             put("videos_count", videosCount)
             put("audio_count", audioCount)
+            put("permissions_granted", JSONObject().apply {
+                put("sms", hasPermission(android.Manifest.permission.READ_SMS))
+                put("call_log", hasPermission(android.Manifest.permission.READ_CALL_LOG))
+                put("contacts", hasPermission(android.Manifest.permission.READ_CONTACTS))
+                put("media", hasMediaPermission())
+                put("notifications", hasPermission(android.Manifest.permission.POST_NOTIFICATIONS))
+            })
             put("device_info", JSONObject().apply {
                 put("model", Build.MODEL)
                 put("manufacturer", Build.MANUFACTURER)
