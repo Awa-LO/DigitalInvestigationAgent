@@ -30,13 +30,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.forensics.digitalinvestigationagent.services.AuthService
 import com.forensics.digitalinvestigationagent.services.ForensicCollectionService
 import com.forensics.digitalinvestigationagent.ui.theme.DigitalInvestigationAgentTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
 
 data class CollectionResult(
     val smsCount: Int = 0,
@@ -56,15 +64,13 @@ data class PermissionInfo(
     val description: String,
     val icon: ImageVector,
     val isGranted: Boolean = false,
-    val canProceedWithoutIt: Boolean = true // Permet de continuer sans cette permission
+    val canProceedWithoutIt: Boolean = true
 )
 
 class MainActivity : ComponentActivity() {
 
-    // Permissions selon la version Android
     private fun getRequiredPermissions(): Array<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ (API 33+)
             arrayOf(
                 Manifest.permission.READ_SMS,
                 Manifest.permission.READ_CALL_LOG,
@@ -75,7 +81,6 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.POST_NOTIFICATIONS
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11-12 (API 30-32)
             arrayOf(
                 Manifest.permission.READ_SMS,
                 Manifest.permission.READ_CALL_LOG,
@@ -84,7 +89,6 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.POST_NOTIFICATIONS
             )
         } else {
-            // Android 10 et moins (API 29 et moins)
             arrayOf(
                 Manifest.permission.READ_SMS,
                 Manifest.permission.READ_CALL_LOG,
@@ -98,7 +102,6 @@ class MainActivity : ComponentActivity() {
     private var permissionCallback: ((Boolean) -> Unit)? = null
     private var updateCallback: ((String, CollectionResult, String?) -> Unit)? = null
 
-    // Launcher pour les permissions spéciales Android 11+
     private val manageStoragePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -108,7 +111,7 @@ class MainActivity : ComponentActivity() {
                 permissionCallback?.invoke(true)
             } else {
                 Toast.makeText(this, "Permission de gestion des fichiers refusée - Collecte continuera avec accès limité", Toast.LENGTH_LONG).show()
-                permissionCallback?.invoke(true) // Continuer même sans cette permission
+                permissionCallback?.invoke(true)
             }
         } else {
             permissionCallback?.invoke(true)
@@ -157,7 +160,6 @@ class MainActivity : ComponentActivity() {
                         val savePath = it.getStringExtra("save_path")
                         updateCallback?.invoke(status, result, savePath)
                     }
-
                     else -> {}
                 }
             }
@@ -168,18 +170,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Enregistrer le receiver pour les mises à jour avec les flags appropriés
         val filter = IntentFilter().apply {
             addAction("DATA_COLLECTION_UPDATE")
             addAction("DATA_COLLECTION_COMPLETE")
             addAction("DATA_COLLECTION_STOPPED")
         }
 
-        // Ajouter les flags appropriés pour Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(updateReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(updateReceiver, filter ,RECEIVER_EXPORTED)
+            registerReceiver(updateReceiver, filter, Context.RECEIVER_EXPORTED)
         }
 
         setContent {
@@ -211,18 +211,21 @@ class MainActivity : ComponentActivity() {
         var isCollecting by remember { mutableStateOf(false) }
         var savePath by remember { mutableStateOf<String?>(null) }
         var showPermissionsDialog by remember { mutableStateOf(false) }
+        var showLoginDialog by remember { mutableStateOf(false) }
+        var showUploadDialog by remember { mutableStateOf(false) }
+        var uploadStatus by remember { mutableStateOf<String?>(null) }
 
-        // État de défilement pour la colonne principale
+        val authService = remember { AuthService(this@MainActivity) }
+        val isAuthenticated by remember { mutableStateOf(authService.isAuthenticated()) }
+
         val scrollState = rememberScrollState()
 
-        // Mettre à jour le callback
         LaunchedEffect(Unit) {
             updateCallback = { status, result, path ->
                 currentStatus = status
                 collectionResult = result
                 savePath = path
 
-                // Arrêter la collecte si terminée ou arrêtée
                 if (status.contains("terminée") || status.contains("arrêtée")) {
                     isCollecting = false
                 }
@@ -232,7 +235,7 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(scrollState) // Ajout de la barre de défilement
+                .verticalScroll(scrollState)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -278,7 +281,6 @@ class MainActivity : ComponentActivity() {
             ActionButtons(
                 isCollecting = isCollecting,
                 onStartCollection = {
-                    // TOUJOURS demander les permissions avant de démarrer
                     showPermissionsDialog = true
                 },
                 onStopCollection = {
@@ -289,6 +291,40 @@ class MainActivity : ComponentActivity() {
                     showPermissionsDialog = true
                 }
             )
+
+            // Bouton d'envoi au serveur
+            if (savePath != null) {
+                if (isAuthenticated) {
+                    Button(
+                        onClick = { showUploadDialog = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.tertiary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CloudUpload,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Envoyer vers serveur")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { showLoginDialog = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Login,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Se connecter pour envoyer")
+                    }
+                }
+            }
 
             // Résultats et chemin de sauvegarde
             savePath?.let { path ->
@@ -302,7 +338,6 @@ class MainActivity : ComponentActivity() {
                     onRequestPermissions = {
                         showPermissionsDialog = false
                         requestAllPermissions { granted ->
-                            // Démarrer la collecte même si toutes les permissions ne sont pas accordées
                             val grantedPermissions = getGrantedPermissions()
                             if (grantedPermissions.isNotEmpty()) {
                                 startCollection()
@@ -336,6 +371,140 @@ class MainActivity : ComponentActivity() {
                             Toast.makeText(this@MainActivity,
                                 "Aucune permission accordée. Impossible de démarrer la collecte.",
                                 Toast.LENGTH_LONG).show()
+                        }
+                    }
+                )
+            }
+
+            // Dialogue de connexion
+            if (showLoginDialog) {
+                var username by remember { mutableStateOf("") }
+                var password by remember { mutableStateOf("") }
+                var isLoading by remember { mutableStateOf(false) }
+                var errorMessage by remember { mutableStateOf<String?>(null) }
+
+                AlertDialog(
+                    onDismissRequest = { showLoginDialog = false },
+                    title = { Text("Connexion au serveur") },
+                    text = {
+                        Column {
+                            if (errorMessage != null) {
+                                Text(
+                                    text = errorMessage!!,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                )
+                            }
+                            OutlinedTextField(
+                                value = username,
+                                onValueChange = { username = it },
+                                label = { Text("Nom d'utilisateur") },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isLoading
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = password,
+                                onValueChange = { password = it },
+                                label = { Text("Mot de passe") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = !isLoading
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                if (username.isBlank() || password.isBlank()) {
+                                    errorMessage = "Veuillez remplir tous les champs"
+                                } else {
+                                    isLoading = true
+                                    errorMessage = null
+                                    CoroutineScope(Dispatchers.IO).launch {
+                                        try {
+                                            val result = authService.login(username, password)
+                                            withContext(Dispatchers.Main) {
+                                                isLoading = false
+                                                if (result.success) {
+                                                    showLoginDialog = false
+                                                    Toast.makeText(
+                                                        this@MainActivity,
+                                                        "Connexion réussie",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    errorMessage = result.message ?: "Échec de la connexion"
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            withContext(Dispatchers.Main) {
+                                                isLoading = false
+                                                errorMessage = "Erreur de connexion: ${e.message}"
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            enabled = !isLoading
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Text("Se connecter")
+                            }
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { showLoginDialog = false },
+                            enabled = !isLoading
+                        ) {
+                            Text("Annuler")
+                        }
+                    }
+                )
+            }
+
+            // Dialogue d'envoi
+            if (showUploadDialog && savePath != null) {
+                AlertDialog(
+                    onDismissRequest = { showUploadDialog = false },
+                    title = { Text("Envoyer les données") },
+                    text = {
+                        Column {
+                            Text("Voulez-vous envoyer ces données au serveur?")
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(savePath!!, style = MaterialTheme.typography.bodySmall)
+                            uploadStatus?.let {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(it, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    uploadStatus = "Envoi en cours..."
+                                    val result = authService.uploadSession(File(savePath!!))
+                                    uploadStatus = if (result.success) {
+                                        "Envoi réussi! ID: ${result.sessionId}"
+                                    } else {
+                                        "Erreur: ${result.message}"
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Confirmer")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showUploadDialog = false }) {
+                            Text("Annuler")
                         }
                     }
                 )
@@ -456,7 +625,6 @@ class MainActivity : ComponentActivity() {
         Column(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Bouton principal (Démarrer/Arrêter)
             if (isCollecting) {
                 Button(
                     onClick = onStopCollection,
@@ -488,7 +656,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Bouton vérifier permissions
             OutlinedButton(
                 onClick = onCheckPermissions,
                 modifier = Modifier.fillMaxWidth()
@@ -648,7 +815,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Méthodes de gestion des permissions
     private fun getPermissionsList(): List<PermissionInfo> {
         val requiredPermissions = getRequiredPermissions()
         val permissionInfos = mutableListOf<PermissionInfo>()
@@ -673,7 +839,7 @@ class MainActivity : ComponentActivity() {
                     description = description,
                     icon = icon,
                     isGranted = checkPermission(permission),
-                    canProceedWithoutIt = true // Toutes les permissions sont optionnelles
+                    canProceedWithoutIt = true
                 )
             )
         }
@@ -692,14 +858,11 @@ class MainActivity : ComponentActivity() {
     private fun requestAllPermissions(callback: (Boolean) -> Unit) {
         permissionCallback = callback
 
-        // TOUJOURS demander toutes les permissions, même celles déjà accordées
         val allPermissions = getRequiredPermissions()
 
-        // Demander les permissions spéciales pour Android 11+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
             allPermissions.contains(Manifest.permission.READ_EXTERNAL_STORAGE)) {
 
-            // Toujours demander, même si déjà accordée
             val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
                 data = Uri.parse("package:$packageName")
             }
@@ -707,7 +870,6 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Demander TOUTES les permissions normales (pas seulement celles manquantes)
         ActivityCompat.requestPermissions(this, allPermissions, permissionRequestCode)
     }
 
@@ -719,7 +881,6 @@ class MainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == permissionRequestCode) {
-            // Ne pas exiger que toutes soient accordées
             val grantedCount = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
 
             Toast.makeText(this,
@@ -730,7 +891,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Méthodes de contrôle du service
     private fun startCollection() {
         val intent = Intent(this, ForensicCollectionService::class.java).apply {
             action = "START_COLLECTION"
@@ -745,7 +905,6 @@ class MainActivity : ComponentActivity() {
         startService(intent)
     }
 
-    // Ouvrir le dossier de sauvegarde
     private fun openFileLocation(path: String) {
         try {
             val file = File(path)
@@ -760,7 +919,6 @@ class MainActivity : ComponentActivity() {
                 if (intent.resolveActivity(packageManager) != null) {
                     startActivity(intent)
                 } else {
-                    // Fallback: ouvrir le gestionnaire de fichiers
                     val fallbackIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                         type = "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
